@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="si">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Body Measurement - AI Camera</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',Arial,sans-serif; }
+  body { background:#0d1117; color:#fff; min-height:100vh; }
+  header { padding:14px 16px; background:#161b22; border-bottom:1px solid #30363d; }
+  header h1 { font-size:18px; color:#58a6ff; }
+  header p { font-size:12px; color:#8b949e; margin-top:2px; }
+  .setup { padding:16px; }
+  .setup label { display:block; font-size:14px; margin-bottom:6px; color:#c9d1d9; }
+  .setup input { width:100%; padding:12px; font-size:16px; border-radius:8px; border:1px solid #30363d; background:#0d1117; color:#fff; margin-bottom:12px; }
+  .setup select { width:100%; padding:12px; font-size:16px; border-radius:8px; border:1px solid #30363d; background:#0d1117; color:#fff; margin-bottom:12px; }
+  button { width:100%; padding:14px; font-size:16px; font-weight:bold; border:none; border-radius:8px; cursor:pointer; }
+  .btn-start { background:#238636; color:#fff; }
+  .btn-stop { background:#da3633; color:#fff; }
+  .camera-wrap { position:relative; width:100%; aspect-ratio:3/4; background:#000; display:none; overflow:hidden; }
+  .camera-wrap video, .camera-wrap canvas { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; }
+  .guide { position:absolute; bottom:8px; left:0; right:0; text-align:center; font-size:12px; color:#ffd33d; text-shadow:0 1px 3px #000; padding:0 10px; }
+  .status { text-align:center; padding:8px; font-size:14px; min-height:34px; }
+  .status.ok { color:#3fb950; }
+  .status.wait { color:#ffd33d; }
+  .results { padding:16px; display:none; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px; text-align:center; }
+  .card .label { font-size:12px; color:#8b949e; }
+  .card .value { font-size:22px; font-weight:bold; color:#58a6ff; margin-top:4px; }
+  .card .value small { font-size:12px; color:#8b949e; font-weight:normal; }
+  .note { margin-top:14px; font-size:12px; color:#8b949e; background:#161b22; border-left:3px solid #f0883e; padding:10px; border-radius:6px; line-height:1.5; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📏 Body Measurement AI</h1>
+  <p>Phone camera eken body measurements (MediaPipe Pose)</p>
+</header>
+
+<div class="setup" id="setupPanel">
+  <label>✅ Step 1 — Obaage height (cm) enter karanna (scale calibration ekata):</label>
+  <input type="number" id="heightInput" placeholder="e.g. 170" min="100" max="250">
+
+  <label>✅ Step 2 — Camera select karanna:</label>
+  <select id="camSelect">
+    <option value="environment">Back Camera (recommended)</option>
+    <option value="user">Front Camera</option>
+  </select>
+
+  <button class="btn-start" onclick="startCamera()">▶ Camera Start Karanna</button>
+  <p style="font-size:12px;color:#8b949e;margin-top:10px;line-height:1.5;">
+    ⚠️ Camera wada karanna nam app eka <b>HTTPS</b> host ekakata (GitHub Pages, Netlify, Vercel) daala
+    phone eken open karanna oni. localhost da wada karanawa.
+  </p>
+</div>
+
+<div class="status wait" id="status">Camera start karanna...</div>
+
+<div class="camera-wrap" id="cameraWrap">
+  <video id="video" playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div class="guide">🧍 Full body eka frame ekata enna — straight haraha 2-3m dura idala yomu karanna</div>
+</div>
+
+<div class="results" id="resultsPanel">
+  <div class="grid" id="resultsGrid"></div>
+  <div class="note">
+    ⚠️ <b>Accuracy note:</b> Shoulder / hip <i>widths</i> saha arm-leg lengths camera distance eke anusaraya
+    haraha pennanawa. Chest / waist / hip <i>circumferences</i> AI-based rough estimates with — tailor-grade
+    accuracy ekak na. Smart clothing apps (e.g. Zeekit/3DLook) wageda meka 2-3 photos + depth data walin
+    wada karanne. E nisa measurements tika approximate widiyata ganna.
+  </div>
+  <br>
+  <button class="btn-stop" onclick="stopCamera()">⏹ Stop</button>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+
+let stream = null, running = false, ema = {};
+
+// ---------- MediaPipe Pose ----------
+const pose = new Pose({
+  locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`
+});
+pose.setOptions({
+  modelComplexity: 1,
+  smoothLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+pose.onResults(onResults);
+
+async function startCamera() {
+  const h = parseFloat(document.getElementById('heightInput').value);
+  if (!h || h < 100 || h > 250) {
+    alert('⚠️ Please obaage real height (cm) enter karanna — measurement accuracy ekata meka mukadda.');
+    return;
+  }
+  window.userHeight = h;
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: document.getElementById('camSelect').value },
+        width: { ideal: 1080 }, height: { ideal: 1920 }
+      },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    canvas.width = video.videoWidth || 720;
+    canvas.height = video.videoHeight || 1280;
+
+    document.getElementById('setupPanel').classList.add('hidden');
+    document.getElementById('cameraWrap').style.display = 'block';
+    document.getElementById('resultsPanel').style.display = 'block';
+
+    running = true;
+    processFrame();
+  } catch (err) {
+    statusEl.textContent = '❌ Camera access failed: ' + err.message + ' (HTTPS ekakda check karanna)';
+  }
+}
+
+function stopCamera() {
+  running = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  location.reload();
+}
+
+async function processFrame() {
+  if (!running) return;
+  if (video.readyState >= 2) {
+    await pose.send({ image: video });
+  }
+  requestAnimationFrame(processFrame);
+}
+
+// ---------- Drawing helpers ----------
+const BONES = [
+  [11,12],[11,13],[13,15],[12,14],[14,16],      // arms
+  [11,23],[12,24],[23,24],                       // torso
+  [23,25],[25,27],[24,26],[26,28],               // legs
+  [0,11],[0,12]                                  // neck hint
+];
+
+function dist(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function smooth(key, val) {
+  if (ema[key] === undefined) ema[key] = val;
+  ema[key] = ema[key] * 0.85 + val * 0.15;
+  return ema[key];
+}
+
+// ---------- Main result handler ----------
+function onResults(results) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!results.poseLandmarks) {
+    statusEl.className = 'status wait';
+    statusEl.textContent = '⏳ Body eka detect karanna ba — light wadi karala, full body pennanna';
+    return;
+  }
+
+  const lm = results.poseLandmarks;
+  const vis = (i) => lm[i].visibility !== undefined ? lm[i].visibility : 1;
+
+  // ----- draw skeleton -----
+  ctx.strokeStyle = '#00ff88';
+  ctx.lineWidth = 3;
+  for (const [a, b] of BONES) {
+    if (vis(a) > 0.4 && vis(b) > 0.4) {
+      ctx.beginPath();
+      ctx.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height);
+      ctx.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height);
+      ctx.stroke();
+    }
+  }
+  ctx.fillStyle = '#ff4444';
+  [11, 12, 23, 24, 15, 16, 27, 28].forEach(i => {
+    if (vis(i) > 0.4) {
+      ctx.beginPath();
+      ctx.arc(lm[i].x * canvas.width, lm[i].y * canvas.height, 5, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  });
+
+  // ----- calibration: person pixel height -----
+  const ankleY = ((lm[27].y + lm[28].y) / 2);
+  const noseY = lm[0].y;
+  let personPx = (ankleY - noseY) * canvas.height;
+  personPx *= 1.12; // head top (nose above ~12%)
+  if (personPx <= 0) return;
+
+  const scale = window.userHeight / personPx; // cm per pixel
+
+  // ----- measurements (widths / lengths are direct; circumferences are estimates) -----
+  const shoulderW = vis(11) > 0.4 && vis(12) > 0.4 ? dist(lm[11], lm[12]) * canvas.width * scale : null;
+  const hipW      = vis(23) > 0.4 && vis(24) > 0.4 ? dist(lm[23], lm[24]) * canvas.width * scale : null;
+  const armL = (vis(11) > 0.4 && vis(15) > 0.4 && vis(12) > 0.4 && vis(16) > 0.4)
+      ? ((dist(lm[11], lm[15]) + dist(lm[12], lm[16])) / 2) * canvas.width * scale : null;
+  const legL = (vis(23) > 0.4 && vis(27) > 0.4 && vis(24) > 0.4 && vis(28) > 0.4)
+      ? ((dist(lm[23], lm[27]) + dist(lm[24], lm[28])) / 2) * canvas.width * scale : null;
+
+  // circumference estimates (empirical ratios — approximate!)
+  const chestC = shoulderW ? shoulderW * 1.9 : null;
+  const waistC = shoulderW ? shoulderW * 1.55 : null;
+  const hipC   = hipW ? hipW * 1.45 : null;
+
+  const items = [
+    ['Shoulder Width', shoulderW],
+    ['Hip Width',      hipW],
+    ['Arm Length',     armL],
+    ['Leg Length',     legL],
+    ['Chest (≈ est.)', chestC],
+    ['Waist (≈ est.)', waistC],
+    ['Hip Circumference (≈)', hipC],
+    ['Height',         window.userHeight]
+  ];
+
+  const grid = document.getElementById('resultsGrid');
+  grid.innerHTML = items.map(([label, v]) => {
+    const val = v ? smooth(label, v) : null;
+    return `<div class="card"><div class="label">${label}</div>
+            <div class="value">${val ? val.toFixed(1) : '—'} <small>cm</small></div></div>`;
+  }).join('');
+
+  statusEl.className = 'status ok';
+  statusEl.textContent = '✅ Body detected — measurements live update wenawa';
+}
+</script>
+</body>
+</html>
